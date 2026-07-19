@@ -1,0 +1,22 @@
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+{% if done %}
+<div class="card">
+  <h3>Waveform &amp; Detected Pitch</h3>
+  <img src="data:image/png;base64,{{ plot }}" alt="waveform and pitch">
+
+  <h3>Notes</h3>
+  {% if notes %}
+    <div class="notes">
+      {% for n in notes %}
+        <div class="note">
+          <b>{{ n.name }}{{ n.octave }}</b>
+          <small>{{ n.hz }} Hz</small>
+          <small>{{ n.t0 }}&ndash;{{ n.t1 }}s</small>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">No stable notes detected.</p>
+  {% endif %}
+</div>
+{% endif %}

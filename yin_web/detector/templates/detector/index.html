@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YIN Pitch Detector</title>
+<style>
+  body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;color:#1a1a1a}
+  h1{font-size:28px}
+  .card{border:1px solid #ddd;border-radius:10px;padding:20px;margin:18px 0}
+  button{font-size:15px;padding:10px 18px;border-radius:7px;border:none;cursor:pointer}
+  .primary{background:#d63b1f;color:#fff}
+  .rec{background:#1f8a5b;color:#fff}
+  .stop{background:#888;color:#fff}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  input[type=file]{font-size:15px}
+  .params{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:16px}
+  .params label{display:block;font-size:13px;color:#555;margin-bottom:4px}
+  .params input{width:100%;font-size:15px;padding:8px;border:1px solid #ccc;border-radius:6px}
+  .err{background:#fdeaea;border:1px solid #e5a3a3;color:#a12727;padding:12px 14px;border-radius:7px;margin:14px 0}
+  img{max-width:100%;border:1px solid #ddd;border-radius:8px;margin-top:10px}
+  .notes{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .note{border:1px solid #ddd;border-radius:8px;padding:8px 12px;min-width:80px}
+  .note b{font-size:18px}
+  .note small{color:#666;display:block;font-size:12px}
+  .muted{color:#666;font-size:14px}
+  #timer{font-size:22px;font-weight:bold;margin-left:12px}
+  .presets{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+  .presets-label{font-size:13px;color:#555;font-weight:600;margin-right:4px}
+  .preset-btn{background:#f0f0f0;color:#333;font-size:13px;padding:7px 14px;border-radius:6px;border:1px solid #ccc;cursor:pointer;transition:background .15s,border-color .15s}
+  .preset-btn:hover{background:#e0e0e0;border-color:#aaa}
+  .preset-btn.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+</style>
+</head>
+<body>
+  <h1>YIN Pitch Detector</h1>
+  <p class="muted">Upload a WAV file, or record live from your microphone. The page shows the waveform, the detected pitch, and the notes.</p>
+
+  <!-- Detection parameters (shared by both input methods) -->
+  <div class="card">
+    <h3>Detection parameters</h3>
+    <div class="presets">
+      <span class="presets-label">Presets:</span>
+      <button type="button" class="preset-btn" onclick="applyPreset('guitar')">🎸 Guitar</button>
+      <button type="button" class="preset-btn" onclick="applyPreset('bass')">🎸 Bass Guitar</button>
+      <button type="button" class="preset-btn" onclick="applyPreset('male')">🎤 Male Voice</button>
+      <button type="button" class="preset-btn" onclick="applyPreset('female')">🎤 Female Voice</button>
+      <button type="button" class="preset-btn" onclick="applyPreset('default')">⚙️ Default</button>
+    </div>
+    <div class="params">
+      <div><label>Min F0 (Hz)</label><input id="p_min_f0" type="number" value="{{ params.min_f0 }}"></div>
+      <div><label>Max F0 (Hz)</label><input id="p_max_f0" type="number" value="{{ params.max_f0 }}"></div>
+      <div><label>Window (W)</label><input id="p_W" type="number" value="{{ params.W }}"></div>
+      <div><label>Decimation</label><input id="p_decimation" type="number" min="1" value="{{ params.decimation }}"></div>
+      <div><label>CMNDF threshold</label><input id="p_threshold" type="number" step="0.05" value="{{ params.threshold }}"></div>
+      <div><label>RMS energy gate</label><input id="p_rms" type="number" step="0.01" value="{{ params.rms }}"></div>
+    </div>
+    <p class="muted">These apply to whichever input you use below.</p>
+  </div>
+
+  <!-- Option 1: file upload -->
+  <div class="card">
+    <h3>Upload a WAV file</h3>
+    <form method="post" enctype="multipart/form-data" id="uploadForm">
+      {% csrf_token %}
+      <input type="file" name="audio" accept="audio/wav,.wav" required>
+      <button class="primary" type="submit">Detect pitch</button>
+    </form>
+  </div>
+
+  <!-- Option 2: live mic -->
+  <div class="card">
+    <h3>Or record live</h3>
+    <button class="rec" id="recBtn" type="button">&#9679; Record</button>
+    <button class="stop" id="stopBtn" type="button" disabled>&#9632; Stop &amp; detect</button>
+    <span id="timer">0.0s</span>
+    <p class="muted" id="recMsg"></p>
+  </div>
+
+  <!-- Results get injected here (also used for the upload page render) -->
+  <div id="results">
+    {% include "detector/_results.html" %}
+  </div>
+
+  <!-- csrf token available to JS -->
+  {% csrf_token %}
+
+<script>
+// ---- collect the current parameter values ----
+function paramValues(){
+  return {
+    min_f0:   document.getElementById("p_min_f0").value,
+    max_f0:   document.getElementById("p_max_f0").value,
+    W:        document.getElementById("p_W").value,
+    decimation: document.getElementById("p_decimation").value,
+    threshold: document.getElementById("p_threshold").value,
+    rms:      document.getElementById("p_rms").value,
+  };
+}
+function getCSRF(){
+  const el=document.querySelector('input[name=csrfmiddlewaretoken]');
+  return el ? el.value : "";
+}
+
+// ---- file upload: add params to the form before it submits ----
+document.getElementById("uploadForm").addEventListener("submit", function(){
+  const p=paramValues();
+  for(const k in p){
+    let h=this.querySelector('input[name="'+k+'"]');
+    if(!h){ h=document.createElement("input"); h.type="hidden"; h.name=k; this.appendChild(h); }
+    h.value=p[k];
+  }
+  // normal (non-AJAX) submit -> full page render with results
+});
+
+// ---- live mic: record, encode WAV, POST via fetch, inject results ----
+const recBtn=document.getElementById("recBtn");
+const stopBtn=document.getElementById("stopBtn");
+const timer=document.getElementById("timer");
+const recMsg=document.getElementById("recMsg");
+
+const PRESETS = {
+  default: {min_f0:50,  max_f0:1500, W:1024, decimation:1, threshold:0.30, rms:0.05},
+  guitar:  {min_f0:50,  max_f0:800,  W:2048, decimation:1, threshold:0.30, rms:0.05},
+  bass:    {min_f0:30,  max_f0:500,  W:4096, decimation:1, threshold:0.30, rms:0.01},
+  male:    {min_f0:80,  max_f0:500,  W:2048, decimation:1, threshold:0.15, rms:0.03},
+  female:  {min_f0:150, max_f0:1200, W:1024, decimation:1, threshold:0.15, rms:0.03},
+};
+let activePreset = null;
+
+function applyPreset(name){
+  const p = PRESETS[name];
+  document.getElementById("p_min_f0").value   = p.min_f0;
+  document.getElementById("p_max_f0").value   = p.max_f0;
+  document.getElementById("p_W").value        = p.W;
+  document.getElementById("p_decimation").value = p.decimation;
+  document.getElementById("p_threshold").value = p.threshold;
+  document.getElementById("p_rms").value      = p.rms;
+  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  activePreset = name;
+}
+
+let audioCtx, stream, source, processor, chunks=[], sampleRate=44100, t0=0, raf;
+
+recBtn.onclick = async () => {
+  try{ stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); }
+  catch(e){ recMsg.textContent = "Mic access denied: "+e.message; return; }
+
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  sampleRate = audioCtx.sampleRate;
+  source = audioCtx.createMediaStreamSource(stream);
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  chunks = [];
+  processor.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(processor); processor.connect(audioCtx.destination);
+
+  recBtn.disabled=true; stopBtn.disabled=false; recMsg.textContent="Recording...";
+  t0=performance.now();
+  const tick=()=>{ timer.textContent=((performance.now()-t0)/1000).toFixed(1)+"s"; raf=requestAnimationFrame(tick); };
+  tick();
+};
+
+stopBtn.onclick = () => {
+  cancelAnimationFrame(raf);
+  recBtn.disabled=false; stopBtn.disabled=true; recMsg.textContent="Processing...";
+  processor.disconnect(); source.disconnect();
+  stream.getTracks().forEach(t=>t.stop());
+
+  let len=0; chunks.forEach(c=>len+=c.length);
+  const buf=new Float32Array(len); let off=0;
+  chunks.forEach(c=>{buf.set(c,off);off+=c.length;});
+
+  const wav = encodeWAV(buf, sampleRate);
+  const fd = new FormData();
+  fd.append("csrfmiddlewaretoken", getCSRF());
+  const p=paramValues();
+  for(const k in p) fd.append(k, p[k]);
+  fd.append("fragment", "1");
+  fd.append("audio", new Blob([wav],{type:"audio/wav"}), "recording.wav");
+
+  fetch("?fragment=1", {method:"POST", body:fd})
+    .then(r=>r.text())
+    .then(html=>{
+      document.getElementById("results").innerHTML = html;   // inject, don't replace page
+      recMsg.textContent = "Done. You can record again.";
+    })
+    .catch(e=>{ recMsg.textContent="Error: "+e.message; });
+};
+
+function encodeWAV(samples, rate){
+  const buffer=new ArrayBuffer(44 + samples.length*2);
+  const v=new DataView(buffer);
+  const wr=(o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  wr(0,"RIFF"); v.setUint32(4, 36+samples.length*2, true); wr(8,"WAVE");
+  wr(12,"fmt "); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  wr(36,"data"); v.setUint32(40, samples.length*2, true);
+  let o=44;
+  for(let i=0;i<samples.length;i++,o+=2){
+    const s=Math.max(-1,Math.min(1,samples[i]));
+    v.setInt16(o, s<0 ? s*0x8000 : s*0x7FFF, true);
+  }
+  return buffer;
+}
+</script>
+</body>
+</html>
